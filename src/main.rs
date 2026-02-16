@@ -4,6 +4,8 @@ mod error;
 mod events;
 mod nfc;
 #[cfg(windows)]
+mod registry_sounds;
+#[cfg(windows)]
 mod service;
 mod ws;
 
@@ -42,6 +44,14 @@ fn run_console(args: AppArgs) -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     let config = config::Config::from_args_and_file(&args)?;
+
+    // Disable device sounds for console mode
+    #[cfg(windows)]
+    let _sound_guard = crate::registry_sounds::SoundSuppressor::new();
+    #[cfg(windows)]
+    if _sound_guard.is_none() {
+        tracing::warn!("Failed to disable device sounds (registry access denied)");
+    }
 
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async {

@@ -48,6 +48,12 @@ fn run_service_inner() -> Result<(), Box<dyn std::error::Error>> {
         .with_env_filter("nfc_bridge=info")
         .init();
 
+    // Disable device sounds for service mode
+    let _sound_guard = crate::registry_sounds::SoundSuppressor::new();
+    if _sound_guard.is_none() {
+        tracing::warn!("Failed to disable device sounds (registry access denied)");
+    }
+
     // Create the shutdown token
     let shutdown = CancellationToken::new();
     let shutdown_trigger = shutdown.clone();
