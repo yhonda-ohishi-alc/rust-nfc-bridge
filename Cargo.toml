@@ -1,6 +1,6 @@
 [package]
 name = "nfc-bridge"
-version = "0.2.12"
+version = "0.2.13"
 edition = "2021"
 description = "NFC reader bridge - reads card UIDs and broadcasts via WebSocket"
 
