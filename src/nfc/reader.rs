@@ -109,6 +109,7 @@ fn read_uid(card: &Card) -> Result<String, BridgeError> {
 /// Returns (readers, card_present, optional read result, optional card handle).
 /// When `skip_read` is true, only checks card presence without connecting.
 /// Card handle is returned to allow disconnect on card removal event.
+#[allow(clippy::type_complexity)]
 fn poll_cycle(
     ctx: &Context,
     skip_read: bool,
