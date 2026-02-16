@@ -138,7 +138,7 @@ fn poll_once() -> Result<Option<CardReadResult>, BridgeError> {
     let card = ctx.connect(reader_name, ShareMode::Shared, Protocols::ANY)?;
 
     // Attempt full license read
-    match license::read_card(&card, &atr_bytes) {
+    let result = match license::read_card(&card, &atr_bytes) {
         Ok(data) => {
             debug!(
                 "Card read: card_id={}, type={}",
@@ -158,7 +158,13 @@ fn poll_once() -> Result<Option<CardReadResult>, BridgeError> {
                 Err(uid_err) => Err(uid_err),
             }
         }
-    }
+    };
+
+    // Disconnect without resetting the card to avoid USB disconnect sound.
+    // The default Drop uses ResetCard, which power-cycles the reader's RF field.
+    let _ = card.disconnect(Disposition::LeaveCard);
+
+    result
 }
 
 /// Main NFC polling loop. Runs indefinitely, sending events via broadcast channel.
