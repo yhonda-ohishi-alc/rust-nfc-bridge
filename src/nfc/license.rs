@@ -147,7 +147,10 @@ pub fn read_card(card: &Card, atr_bytes: &[u8]) -> Result<LicenseData, BridgeErr
             Some(uid)
         }
         Ok((_data, sw1, sw2)) => {
-            info!("[license] FeliCa IDm: not available (SW={:02X}{:02X})", sw1, sw2);
+            info!(
+                "[license] FeliCa IDm: not available (SW={:02X}{:02X})",
+                sw1, sw2
+            );
             None
         }
         Err(e) => {
