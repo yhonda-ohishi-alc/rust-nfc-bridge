@@ -105,13 +105,17 @@ fn read_uid(card: &Card) -> Result<String, BridgeError> {
     Ok(uid_hex)
 }
 
-/// Combined poll cycle: list readers + poll card using a shared Context.
-/// This avoids creating/destroying the PCSC context on every iteration.
-fn poll_cycle(ctx: &Context) -> Result<(Vec<String>, Option<CardReadResult>), BridgeError> {
+/// Combined poll cycle: list readers + check card presence + optionally read.
+/// Returns (readers, card_present, optional read result).
+/// When `skip_read` is true, only checks card presence without connecting.
+fn poll_cycle(
+    ctx: &Context,
+    skip_read: bool,
+) -> Result<(Vec<String>, bool, Option<CardReadResult>), BridgeError> {
     let mut readers_buf = [0u8; 2048];
     let reader_names: Vec<_> = match ctx.list_readers(&mut readers_buf) {
         Ok(readers) => readers.collect(),
-        Err(pcsc::Error::NoReadersAvailable) => return Ok((vec![], None)),
+        Err(pcsc::Error::NoReadersAvailable) => return Ok((vec![], false, None)),
         Err(e) => return Err(BridgeError::Pcsc(e)),
     };
 
@@ -121,29 +125,29 @@ fn poll_cycle(ctx: &Context) -> Result<(Vec<String>, Option<CardReadResult>), Br
         .collect();
 
     if reader_names.is_empty() {
-        return Ok((readers, None));
+        return Ok((readers, false, None));
     }
 
     let reader_name = reader_names[0];
-
     let mut reader_states = vec![ReaderState::new(reader_name, State::UNAWARE)];
 
-    // Wait up to 200ms for a card event
     match ctx.get_status_change(Duration::from_millis(200), &mut reader_states) {
         Ok(()) => {}
-        Err(pcsc::Error::Timeout) => return Ok((readers, None)),
+        Err(pcsc::Error::Timeout) => return Ok((readers, false, None)),
         Err(e) => return Err(BridgeError::Pcsc(e)),
     }
 
     let state = reader_states[0].event_state();
     if !state.contains(State::PRESENT) {
-        return Ok((readers, None));
+        return Ok((readers, false, None));
     }
 
-    // Get ATR from reader state (available before connecting)
-    let atr_bytes = reader_states[0].atr().to_vec();
+    // Card is present
+    if skip_read {
+        return Ok((readers, true, None));
+    }
 
-    // Card is present — connect and read
+    let atr_bytes = reader_states[0].atr().to_vec();
     let card = ctx.connect(reader_name, ShareMode::Shared, Protocols::ANY)?;
 
     let result = match license::read_card(&card, &atr_bytes) {
@@ -162,31 +166,28 @@ fn poll_cycle(ctx: &Context) -> Result<(Vec<String>, Option<CardReadResult>), Br
                     debug!("Fallback UID: {}", uid);
                     Some(CardReadResult::Uid(uid))
                 }
-                Err(_) => return Ok((readers, None)),
+                Err(_) => None,
             }
         }
     };
 
-    // Disconnect without resetting the card to avoid USB disconnect sound.
-    // The default Drop uses ResetCard, which power-cycles the reader's RF field.
-    let _ = card.disconnect(Disposition::LeaveCard);
+    // Leak the card handle to prevent SCardDisconnect from being called.
+    // SCardDisconnect causes the NFC reader to reset, triggering Windows USB notification sound.
+    std::mem::forget(card);
 
-    Ok((readers, result))
+    Ok((readers, true, result))
 }
 
 /// Main NFC polling loop. Runs indefinitely, sending events via broadcast channel.
-/// The PCSC context is created once and reused across iterations to avoid
-/// repeated SCardEstablishContext/SCardReleaseContext calls that can cause
-/// the NFC reader to reset.
 pub async fn nfc_polling_loop(config: Config, event_tx: broadcast::Sender<NfcEvent>) {
     let mut debouncer = CardDebouncer::new(Duration::from_millis(config.cooldown_ms));
     let poll_interval = Duration::from_millis(config.poll_interval_ms);
     let mut last_no_readers_log = Instant::now() - Duration::from_secs(10);
     let mut previous_readers: Vec<String> = vec![];
     let mut ctx: Option<Arc<Context>> = None;
+    let mut card_read_done = false;
 
     loop {
-        // Ensure we have a valid PCSC context (created once, reused across iterations)
         if ctx.is_none() {
             match Context::establish(Scope::User) {
                 Ok(c) => ctx = Some(Arc::new(c)),
@@ -199,10 +200,16 @@ pub async fn nfc_polling_loop(config: Config, event_tx: broadcast::Sender<NfcEve
         }
 
         let ctx_ref = ctx.as_ref().unwrap().clone();
-        let cycle_result = tokio::task::spawn_blocking(move || poll_cycle(&ctx_ref)).await;
+        let skip = card_read_done;
+        let cycle_result = tokio::task::spawn_blocking(move || poll_cycle(&ctx_ref, skip)).await;
 
         match cycle_result {
-            Ok(Ok((readers, card_result))) => {
+            Ok(Ok((readers, card_present, card_result))) => {
+                // Card removed — allow next read
+                if !card_present {
+                    card_read_done = false;
+                }
+
                 // Hot-plug detection
                 if readers != previous_readers {
                     info!(
@@ -230,6 +237,7 @@ pub async fn nfc_polling_loop(config: Config, event_tx: broadcast::Sender<NfcEve
 
                 // Handle card read
                 if let Some(result) = card_result {
+                    card_read_done = true;
                     if debouncer.should_emit(result.debounce_key()) {
                         let event = match result {
                             CardReadResult::Uid(uid) => {
@@ -258,9 +266,9 @@ pub async fn nfc_polling_loop(config: Config, event_tx: broadcast::Sender<NfcEve
                 }
             }
             Ok(Err(e)) => {
-                // PCSC error — context may be invalid, recreate on next iteration
                 warn!("NFC poll error: {}, will re-establish context", e);
                 ctx = None;
+                card_read_done = false;
                 let _ = event_tx.send(NfcEvent::NfcError {
                     error: e.to_string(),
                 });
