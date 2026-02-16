@@ -1,0 +1,77 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry & build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Run tests
+        run: cargo test --release
+
+      - name: Install cargo-wix
+        run: cargo install cargo-wix
+
+      - name: Build MSI installer
+        run: cargo wix --no-build --nocapture
+
+      - name: Extract version from tag
+        id: version
+        shell: bash
+        run: echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
+      - name: Rename MSI for release
+        shell: bash
+        run: |
+          for f in target/wix/*.msi; do
+            mv "$f" "target/wix/nfc-bridge-${{ steps.version.outputs.version }}-x86_64.msi"
+          done
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "NFC Bridge v${{ steps.version.outputs.version }}"
+          body: |
+            ## NFC Bridge v${{ steps.version.outputs.version }}
+
+            ### インストール方法
+            1. `nfc-bridge-${{ steps.version.outputs.version }}-x86_64.msi` をダウンロード
+            2. MSI を実行してインストール
+            3. NFC Bridge サービスが自動的に起動します
+
+            ### ファイル
+            - `.msi` — Windows インストーラー（サービス登録 + 設定ファイル込み）
+            - `.exe` — スタンドアロン実行ファイル（コンソールモードで手動実行用）
+
+            ### コンソールモードで実行
+            ```
+            nfc-bridge.exe --console
+            ```
+          files: |
+            target/release/nfc-bridge.exe
+            target/wix/*.msi
+          draft: false
+          prerelease: false

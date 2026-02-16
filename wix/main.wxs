@@ -1,0 +1,104 @@
+<?xml version='1.0' encoding='windows-1252'?>
+<Wix xmlns='http://schemas.microsoft.com/wix/2006/wi'>
+
+  <?define Manufacturer = 'Ohishi ALC' ?>
+  <?define ProductName = 'NFC Bridge' ?>
+  <?define UpgradeCode = '7B3E8A1F-4D2C-4F9B-A8E6-1C5D3F7A9B2E' ?>
+
+  <Product
+    Id='*'
+    Name='$(var.ProductName)'
+    UpgradeCode='$(var.UpgradeCode)'
+    Manufacturer='$(var.Manufacturer)'
+    Language='1033'
+    Codepage='1252'
+    Version='!(bind.FileVersion.NfcBridgeExe)'>
+
+    <Package
+      InstallerVersion='450'
+      Compressed='yes'
+      InstallScope='perMachine'
+      Description='NFC Bridge - NFC card reader to WebSocket bridge service'
+      Manufacturer='$(var.Manufacturer)' />
+
+    <MajorUpgrade
+      Schedule='afterInstallInitialize'
+      DowngradeErrorMessage='A newer version of [ProductName] is already installed.' />
+
+    <MediaTemplate EmbedCab='yes' />
+
+    <!-- Directory structure -->
+    <Directory Id='TARGETDIR' Name='SourceDir'>
+      <Directory Id='ProgramFiles64Folder' Name='PFiles'>
+        <Directory Id='APPLICATIONFOLDER' Name='NfcBridge'>
+          <Directory Id='LogFolder' Name='logs' />
+        </Directory>
+      </Directory>
+    </Directory>
+
+    <!-- Application files -->
+    <DirectoryRef Id='APPLICATIONFOLDER'>
+      <!-- Main executable + Windows Service registration -->
+      <Component Id='NfcBridgeExeComp' Guid='A1B2C3D4-E5F6-7890-ABCD-EF1234567890' Win64='yes'>
+        <File
+          Id='NfcBridgeExe'
+          Name='nfc-bridge.exe'
+          DiskId='1'
+          Source='target\release\nfc-bridge.exe'
+          KeyPath='yes' />
+
+        <ServiceInstall
+          Id='NfcBridgeServiceInstall'
+          Type='ownProcess'
+          Vital='yes'
+          Name='NfcBridge'
+          DisplayName='NFC Bridge Service'
+          Description='NFC カードリーダーから UID を読み取り、WebSocket (ws://127.0.0.1:9876) で配信します'
+          Start='auto'
+          Account='LocalSystem'
+          ErrorControl='normal'
+          Interactive='no' />
+
+        <ServiceControl
+          Id='NfcBridgeServiceControl'
+          Name='NfcBridge'
+          Start='install'
+          Stop='both'
+          Remove='uninstall'
+          Wait='yes' />
+      </Component>
+
+      <!-- Config file (NeverOverwrite to preserve user edits on upgrade) -->
+      <Component Id='ConfigFileComp' Guid='B2C3D4E5-F6A7-8901-BCDE-F12345678901' Win64='yes' NeverOverwrite='yes'>
+        <File
+          Id='ConfigFile'
+          Name='nfc-bridge.toml'
+          DiskId='1'
+          Source='config\nfc-bridge.default.toml'
+          KeyPath='yes' />
+      </Component>
+    </DirectoryRef>
+
+    <!-- Create logs directory -->
+    <DirectoryRef Id='LogFolder'>
+      <Component Id='LogFolderComp' Guid='C3D4E5F6-A7B8-9012-CDEF-123456789012' Win64='yes'>
+        <CreateFolder />
+      </Component>
+    </DirectoryRef>
+
+    <!-- Feature definition -->
+    <Feature
+      Id='MainFeature'
+      Title='NFC Bridge Service'
+      Description='NFC Bridge application and Windows service'
+      Level='1'
+      ConfigurableDirectory='APPLICATIONFOLDER'
+      AllowAdvertise='no'
+      Display='expand'
+      Absent='disallow'>
+      <ComponentRef Id='NfcBridgeExeComp' />
+      <ComponentRef Id='ConfigFileComp' />
+      <ComponentRef Id='LogFolderComp' />
+    </Feature>
+  </Product>
+</Wix>

@@ -1,0 +1,17 @@
+# NFC Bridge Configuration
+# This file is read from the same directory as nfc-bridge.exe
+
+# WebSocket server port
+port = 9876
+
+# WebSocket bind address (127.0.0.1 = localhost only)
+bind_addr = "127.0.0.1"
+
+# NFC polling interval in milliseconds
+poll_interval_ms = 200
+
+# Cooldown before the same card UID is sent again (milliseconds)
+cooldown_ms = 3000
+
+# Log directory (empty = <exe_dir>/logs)
+log_dir = ""
