@@ -27,10 +27,12 @@ pub async fn run_ws_server(
     info!("WebSocket server listening on ws://{}", addr);
 
     let clients: ClientMap = Arc::new(Mutex::new(HashMap::new()));
+    let last_status: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let mut next_id: ClientId = 0;
 
     // Spawn a task to broadcast NFC events to all connected clients
     let broadcast_clients = clients.clone();
+    let status_cache = last_status.clone();
     tokio::spawn(async move {
         while let Ok(event) = event_rx.recv().await {
             let json = match serde_json::to_string(&event) {
@@ -40,6 +42,11 @@ pub async fn run_ws_server(
                     continue;
                 }
             };
+
+            // Cache the latest status for new clients
+            if matches!(event, NfcEvent::Status { .. }) {
+                *status_cache.lock().await = Some(json.clone());
+            }
 
             let mut map = broadcast_clients.lock().await;
             let mut dead_clients = vec![];
@@ -74,6 +81,14 @@ pub async fn run_ws_server(
 
         let (sink, mut incoming) = ws_stream.split();
         clients.lock().await.insert(client_id, sink);
+
+        // Send cached status to new client so it receives version info
+        if let Some(status_json) = last_status.lock().await.as_ref() {
+            let mut map = clients.lock().await;
+            if let Some(sink) = map.get_mut(&client_id) {
+                let _ = sink.send(Message::Text(status_json.clone())).await;
+            }
+        }
 
         // Spawn a task to handle incoming messages (ping/pong, close)
         let disconnect_clients = clients.clone();
