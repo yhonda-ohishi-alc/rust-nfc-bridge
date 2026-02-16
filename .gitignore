@@ -1,1 +1,16 @@
 /target
+
+# Claude files
+.claude/
+
+# Build scripts
+build.sh
+run.sh
+
+# Python test files
+printobserver.py
+test_nfc_simple.py
+
+# Other projects
+menkyo_go/
+wxpython_test/
