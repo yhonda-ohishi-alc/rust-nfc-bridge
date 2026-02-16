@@ -28,6 +28,10 @@ pub enum NfcEvent {
         felica_uid: Option<String>,
     },
 
+    /// Debug log for APDU step tracing (sent to browser console).
+    #[serde(rename = "nfc_debug")]
+    NfcDebug { message: String },
+
     /// Error during NFC operation.
     #[serde(rename = "nfc_error")]
     NfcError { error: String },

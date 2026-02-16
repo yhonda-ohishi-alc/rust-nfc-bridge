@@ -111,6 +111,7 @@ fn read_uid(card: &Card) -> Result<String, BridgeError> {
 fn poll_cycle(
     ctx: &Context,
     skip_read: bool,
+    event_tx: &broadcast::Sender<NfcEvent>,
 ) -> Result<(Vec<String>, bool, Option<CardReadResult>), BridgeError> {
     let mut readers_buf = [0u8; 2048];
     let reader_names: Vec<_> = match ctx.list_readers(&mut readers_buf) {
@@ -150,7 +151,7 @@ fn poll_cycle(
     let atr_bytes = reader_states[0].atr().to_vec();
     let card = ctx.connect(reader_name, ShareMode::Shared, Protocols::ANY)?;
 
-    let result = match license::read_card(&card, &atr_bytes) {
+    let result = match license::read_card(&card, &atr_bytes, event_tx) {
         Ok(data) => {
             debug!(
                 "Card read: card_id={}, type={}",
@@ -201,7 +202,9 @@ pub async fn nfc_polling_loop(config: Config, event_tx: broadcast::Sender<NfcEve
 
         let ctx_ref = ctx.as_ref().unwrap().clone();
         let skip = card_read_done;
-        let cycle_result = tokio::task::spawn_blocking(move || poll_cycle(&ctx_ref, skip)).await;
+        let tx = event_tx.clone();
+        let cycle_result =
+            tokio::task::spawn_blocking(move || poll_cycle(&ctx_ref, skip, &tx)).await;
 
         match cycle_result {
             Ok(Ok((readers, card_present, card_result))) => {

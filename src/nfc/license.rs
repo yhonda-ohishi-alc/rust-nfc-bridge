@@ -1,7 +1,9 @@
 use pcsc::Card;
-use tracing::{info, warn};
+use tokio::sync::broadcast;
+use tracing::info;
 
 use crate::error::BridgeError;
+use crate::events::NfcEvent;
 
 // --- APDU command constants (ported from menkyo_go_ref/internal/nfc/license_reader.go) ---
 
@@ -132,56 +134,82 @@ fn read_driver_license_data(card: &Card) -> Result<(Option<String>, Option<u8>),
     Ok((expiry_date, remain_count))
 }
 
+/// Send a debug log to the browser console via WebSocket.
+fn debug_log(tx: &broadcast::Sender<NfcEvent>, msg: &str) {
+    info!("{}", msg);
+    let _ = tx.send(NfcEvent::NfcDebug {
+        message: msg.to_string(),
+    });
+}
+
 /// Read card data from a connected card.
 /// `atr_bytes` is the raw ATR obtained from ReaderState.
-pub fn read_card(card: &Card, atr_bytes: &[u8]) -> Result<LicenseData, BridgeError> {
+/// `tx` is used to send real-time debug logs to the browser console.
+pub fn read_card(
+    card: &Card,
+    atr_bytes: &[u8],
+    tx: &broadcast::Sender<NfcEvent>,
+) -> Result<LicenseData, BridgeError> {
     let atr_hex = to_hex(atr_bytes);
-    info!("[license] ATR: {}", atr_hex);
+    debug_log(tx, &format!("[license] ATR: {}", atr_hex));
 
     // Step 1: Get FeliCa IDm (before START command)
+    debug_log(tx, "[license] Step 1: GET_FELICA_IDM...");
     let felica_uid = match transmit_apdu(card, CMD_GET_FELICA_IDM) {
         Ok((data, sw1, sw2)) if sw1 == 0x90 && sw2 == 0x00 && data.len() >= 4 => {
             let len = std::cmp::min(data.len(), 8);
             let uid = to_hex(&data[..len]);
-            info!("[license] FeliCa IDm: {} ({}bytes)", uid, data.len());
+            debug_log(
+                tx,
+                &format!("[license] FeliCa IDm: {} ({}bytes)", uid, data.len()),
+            );
             Some(uid)
         }
         Ok((_data, sw1, sw2)) => {
-            info!(
-                "[license] FeliCa IDm: not available (SW={:02X}{:02X})",
-                sw1, sw2
+            debug_log(
+                tx,
+                &format!(
+                    "[license] FeliCa IDm: not available (SW={:02X}{:02X})",
+                    sw1, sw2
+                ),
             );
             None
         }
         Err(e) => {
-            info!("[license] FeliCa IDm: error ({})", e);
+            debug_log(tx, &format!("[license] FeliCa IDm: error ({})", e));
             None
         }
     };
 
     // Step 2: Initialize session
-    info!("[license] Sending START...");
+    debug_log(tx, "[license] Step 2: START...");
     transmit_apdu(card, CMD_START)
         .map_err(|e| BridgeError::CardReadFailed(format!("START failed: {}", e)))?;
+    debug_log(tx, "[license] Step 2: START done");
 
-    info!("[license] Sending START_TRANS...");
+    debug_log(tx, "[license] Step 3: START_TRANS...");
     transmit_apdu(card, CMD_START_TRANS)
         .map_err(|e| BridgeError::CardReadFailed(format!("START_TRANS failed: {}", e)))?;
+    debug_log(tx, "[license] Step 3: START_TRANS done");
 
-    // Step 3: Detect card type
+    // Step 4: Detect card type
+    debug_log(tx, "[license] Step 4: detect_card_type...");
     let card_type = detect_card_type(card, atr_bytes);
-    info!("[license] Card type: {}", card_type.as_str());
+    debug_log(tx, &format!("[license] Card type: {}", card_type.as_str()));
 
-    // Step 4: Read license-specific data if applicable
+    // Step 5: Read license-specific data if applicable
     let (expiry_date, remain_count) = if card_type == CardType::DriverLicense {
+        debug_log(tx, "[license] Step 5: read_driver_license_data...");
         match read_driver_license_data(card) {
             Ok((expiry, remain)) => {
-                info!("[license] Expiry date: {:?}", expiry);
-                info!("[license] Remain count: {:?}", remain);
+                debug_log(
+                    tx,
+                    &format!("[license] Expiry: {:?}, Remain: {:?}", expiry, remain),
+                );
                 (expiry, remain)
             }
             Err(e) => {
-                warn!("[license] Failed to read license data: {}", e);
+                debug_log(tx, &format!("[license] Failed to read license data: {}", e));
                 (None, None)
             }
         }
@@ -189,7 +217,7 @@ pub fn read_card(card: &Card, atr_bytes: &[u8]) -> Result<LicenseData, BridgeErr
         (None, None)
     };
 
-    // Step 5: Generate card_id (same logic as menkyo_go_ref)
+    // Step 6: Generate card_id
     let card_id = if card_type == CardType::DriverLicense {
         expiry_date
             .clone()
@@ -198,10 +226,12 @@ pub fn read_card(card: &Card, atr_bytes: &[u8]) -> Result<LicenseData, BridgeErr
         felica_uid.clone().unwrap_or_default()
     };
 
-    info!("[license] card_id: {}", card_id);
+    debug_log(tx, &format!("[license] card_id: {}", card_id));
 
-    // Step 6: End session (best effort)
+    // Step 7: End session (best effort)
+    debug_log(tx, "[license] Step 7: SELECT_END...");
     let _ = transmit_apdu(card, CMD_SELECT_END);
+    debug_log(tx, "[license] Step 7: SELECT_END done");
 
     Ok(LicenseData {
         card_id,
