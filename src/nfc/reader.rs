@@ -171,9 +171,9 @@ fn poll_cycle(
         }
     };
 
-    // Leak the card handle to prevent SCardDisconnect from being called.
-    // SCardDisconnect causes the NFC reader to reset, triggering Windows USB notification sound.
-    std::mem::forget(card);
+    // Disconnect with LeaveCard disposition to prevent reader reset.
+    // Default Drop uses ResetCard which triggers Windows USB notification sound.
+    let _ = card.disconnect(Disposition::LeaveCard);
 
     Ok((readers, true, result))
 }
