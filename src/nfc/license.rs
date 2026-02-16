@@ -1,5 +1,5 @@
 use pcsc::Card;
-use tracing::warn;
+use tracing::{info, warn};
 
 use crate::error::BridgeError;
 
@@ -136,32 +136,49 @@ fn read_driver_license_data(card: &Card) -> Result<(Option<String>, Option<u8>),
 /// `atr_bytes` is the raw ATR obtained from ReaderState.
 pub fn read_card(card: &Card, atr_bytes: &[u8]) -> Result<LicenseData, BridgeError> {
     let atr_hex = to_hex(atr_bytes);
+    info!("[license] ATR: {}", atr_hex);
 
     // Step 1: Get FeliCa IDm (before START command)
     let felica_uid = match transmit_apdu(card, CMD_GET_FELICA_IDM) {
-        Ok((data, 0x90, 0x00)) if data.len() >= 4 => {
+        Ok((data, sw1, sw2)) if sw1 == 0x90 && sw2 == 0x00 && data.len() >= 4 => {
             let len = std::cmp::min(data.len(), 8);
-            Some(to_hex(&data[..len]))
+            let uid = to_hex(&data[..len]);
+            info!("[license] FeliCa IDm: {} ({}bytes)", uid, data.len());
+            Some(uid)
         }
-        _ => None,
+        Ok((_data, sw1, sw2)) => {
+            info!("[license] FeliCa IDm: not available (SW={:02X}{:02X})", sw1, sw2);
+            None
+        }
+        Err(e) => {
+            info!("[license] FeliCa IDm: error ({})", e);
+            None
+        }
     };
 
     // Step 2: Initialize session
+    info!("[license] Sending START...");
     transmit_apdu(card, CMD_START)
         .map_err(|e| BridgeError::CardReadFailed(format!("START failed: {}", e)))?;
 
+    info!("[license] Sending START_TRANS...");
     transmit_apdu(card, CMD_START_TRANS)
         .map_err(|e| BridgeError::CardReadFailed(format!("START_TRANS failed: {}", e)))?;
 
     // Step 3: Detect card type
     let card_type = detect_card_type(card, atr_bytes);
+    info!("[license] Card type: {}", card_type.as_str());
 
     // Step 4: Read license-specific data if applicable
     let (expiry_date, remain_count) = if card_type == CardType::DriverLicense {
         match read_driver_license_data(card) {
-            Ok(result) => result,
+            Ok((expiry, remain)) => {
+                info!("[license] Expiry date: {:?}", expiry);
+                info!("[license] Remain count: {:?}", remain);
+                (expiry, remain)
+            }
             Err(e) => {
-                warn!("Failed to read license data: {}", e);
+                warn!("[license] Failed to read license data: {}", e);
                 (None, None)
             }
         }
@@ -177,6 +194,8 @@ pub fn read_card(card: &Card, atr_bytes: &[u8]) -> Result<LicenseData, BridgeErr
     } else {
         felica_uid.clone().unwrap_or_default()
     };
+
+    info!("[license] card_id: {}", card_id);
 
     // Step 6: End session (best effort)
     let _ = transmit_apdu(card, CMD_SELECT_END);
