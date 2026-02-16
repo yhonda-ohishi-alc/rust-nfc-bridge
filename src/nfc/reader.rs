@@ -126,8 +126,28 @@ pub async fn nfc_polling_loop(config: Config, event_tx: broadcast::Sender<NfcEve
     let mut debouncer = CardDebouncer::new(Duration::from_millis(config.cooldown_ms));
     let poll_interval = Duration::from_millis(config.poll_interval_ms);
     let mut last_no_readers_log = Instant::now() - Duration::from_secs(10);
+    let mut previous_readers: Vec<String> = vec![];
 
     loop {
+        // Check for reader list changes (hot-plug detection)
+        let current_readers = tokio::task::spawn_blocking(list_readers_sync)
+            .await
+            .unwrap_or(Ok(vec![]))
+            .unwrap_or_default();
+
+        if current_readers != previous_readers {
+            info!(
+                "NFC readers changed: {:?} -> {:?}",
+                previous_readers, current_readers
+            );
+            let _ = event_tx.send(NfcEvent::Status {
+                readers: current_readers.clone(),
+                connected: !current_readers.is_empty(),
+                version: env!("CARGO_PKG_VERSION").to_string(),
+            });
+            previous_readers = current_readers;
+        }
+
         let poll_result = tokio::task::spawn_blocking(poll_once).await;
 
         match poll_result {
