@@ -1,5 +1,5 @@
 use pcsc::Card;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::error::BridgeError;
 
@@ -10,6 +10,12 @@ const CMD_START: &[u8] = &[0xFF, 0xC2, 0x00, 0x00, 0x01, 0x81];
 
 /// Begin transaction.
 const CMD_START_TRANS: &[u8] = &[0xFF, 0xC2, 0x00, 0x00, 0x02, 0x84, 0x00];
+
+/// Turn off RF field.
+const CMD_RF_OFF: &[u8] = &[0xFF, 0xC2, 0x00, 0x00, 0x02, 0x83, 0x00];
+
+/// Select FeliCa (printobserver.py compatibility).
+const CMD_SELECT_FELICA: &[u8] = &[0xFF, 0x00, 0x50, 0x00, 0x02, 0xff, 0xff];
 
 /// Check for car inspection certificate (車検証チェック).
 const CMD_CHECK_SHAKEN: &[u8] = &[0xFF, 0xCA, 0x01, 0x00, 0x00];
@@ -198,9 +204,78 @@ pub fn read_card(card: &Card, atr_bytes: &[u8]) -> Result<LicenseData, BridgeErr
 
     info!("[license] card_id: {}", card_id);
 
-    // End transparent session so reader returns to normal mode.
-    // Without this, removing the card while in transparent mode causes USB reset.
-    let _ = transmit_apdu(card, CMD_SELECT_END);
+    // ============================================================================
+    // CMD_SELECT_END 試行錯誤履歴 (Firmware Ver.1.08)
+    // ============================================================================
+    // ❌ 試行1: CMD_SELECT_END送信 + 100ms待機 + disconnect()
+    //    → USB切断音が鳴る
+    //
+    // ❌ 試行2: CMD_SELECT_END送信 + 300ms待機 + disconnect()
+    //    → USB切断音が鳴る
+    //
+    // ❌ 試行3: CMD_SELECT_ENDスキップ + mem::forget()
+    //    → USB切断音がまだ鳴る
+    //
+    // ❌ 試行4: CMD_SELECT_END復活 + mem::forget()
+    //    → Transparentモードを抜けてからカードを離す
+    //    → USB切断音がまだ鳴る
+    //
+    // 📝 試行5: CMD_RF_OFF → CMD_SELECT_END → mem::forget()
+    //    結果: USB切断音がまだ鳴る
+    //
+    // 📝 試行6: CMD_RF_OFF のみ、CMD_SELECT_ENDをスキップ
+    //    結果: USB切断音がまだ鳴る
+    //
+    // ❌ 試行7-8: SCardControlでAuto Polling/Buzzer無効化
+    //    結果: カード検出自体ができなくなった
+    //
+    // ❌ 試行9: CMD_SELECT_END復活 + Disposition::LeaveCard
+    //    結果: USB切断音がまだ鳴る
+    //
+    // ❌ 試行10: printobserver.pyアプローチ（disconnect後にfalse返してカード削除扱い）
+    //    結果: USB切断音がまだ鳴る
+    //
+    // ❌ 試行11: カード読み取り直後に reconnect を試みる
+    //    結果: USB切断音がまだ鳴る
+    //
+    // ❌ 試行12: CMD_SELECT_ENDをスキップ、SELECT_felica のみ送信 + mem::forget()
+    //    結果: USB切断音がまだ鳴る
+    //
+    // 📝 試行13 (現在): printobserver.py の完全再現
+    //    printobserver.py 解析 (Line 152-157):
+    //    ```python
+    //    response1, sw1, sw2 = card.connection.transmit(SELECT_end)  # Line 152
+    //    card.connection.disconnect()                                 # Line 157
+    //    ```
+    //    → SELECT_end を送信してから disconnect している
+    //    → ただし、CardMonitor が別スレッドで監視（非同期処理）
+    //    → カード削除イベントで再度 disconnect (Line 164)
+    //
+    //    修正内容:
+    //    - CMD_SELECT_END を送信する（printobserver.py と同じ）
+    //    - ただし、disconnect は reader.rs で**カード削除検出時**のみ実行
+    //    - カード読み取り直後の disconnect を削除
+    //
+    //    仮説: disconnect のタイミングが重要
+    //          カード読み取り直後ではなく、カード削除検出時に disconnect すべき
+    // ============================================================================
+
+    // 試行13: printobserver.py 方式を採用
+    // printobserver.py では SELECT_end を送信している (Line 152)
+    // その後 disconnect を呼んでいる (Line 157)
+    // ただし、実際の disconnect は CardMonitor が処理する
+    info!("[license] Sending CMD_SELECT_END as printobserver.py does");
+
+    match transmit_apdu(card, CMD_SELECT_END) {
+        Ok((_, sw1, sw2)) => {
+            info!("[license] CMD_SELECT_END sent: SW={:02X}{:02X}", sw1, sw2);
+        }
+        Err(e) => {
+            warn!("[license] Failed to send CMD_SELECT_END: {}", e);
+        }
+    }
+
+    info!("[license] read_card completed, returning card handle to poll_cycle for later cleanup");
 
     Ok(LicenseData {
         card_id,

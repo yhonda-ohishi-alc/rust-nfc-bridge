@@ -24,6 +24,7 @@ tracing-appender = "0.2"
 
 [target.'cfg(windows)'.dependencies]
 windows-service = "0.7"
+winreg = "0.52"
 
 [profile.release]
 opt-level = 2

@@ -106,16 +106,17 @@ fn read_uid(card: &Card) -> Result<String, BridgeError> {
 }
 
 /// Combined poll cycle: list readers + check card presence + optionally read.
-/// Returns (readers, card_present, optional read result).
+/// Returns (readers, card_present, optional read result, optional card handle).
 /// When `skip_read` is true, only checks card presence without connecting.
+/// Card handle is returned to allow disconnect on card removal event.
 fn poll_cycle(
     ctx: &Context,
     skip_read: bool,
-) -> Result<(Vec<String>, bool, Option<CardReadResult>), BridgeError> {
+) -> Result<(Vec<String>, bool, Option<CardReadResult>, Option<pcsc::Card>), BridgeError> {
     let mut readers_buf = [0u8; 2048];
     let reader_names: Vec<_> = match ctx.list_readers(&mut readers_buf) {
         Ok(readers) => readers.collect(),
-        Err(pcsc::Error::NoReadersAvailable) => return Ok((vec![], false, None)),
+        Err(pcsc::Error::NoReadersAvailable) => return Ok((vec![], false, None, None)),
         Err(e) => return Err(BridgeError::Pcsc(e)),
     };
 
@@ -125,7 +126,7 @@ fn poll_cycle(
         .collect();
 
     if reader_names.is_empty() {
-        return Ok((readers, false, None));
+        return Ok((readers, false, None, None));
     }
 
     let reader_name = reader_names[0];
@@ -133,22 +134,22 @@ fn poll_cycle(
 
     match ctx.get_status_change(Duration::from_millis(200), &mut reader_states) {
         Ok(()) => {}
-        Err(pcsc::Error::Timeout) => return Ok((readers, false, None)),
+        Err(pcsc::Error::Timeout) => return Ok((readers, false, None, None)),
         Err(e) => return Err(BridgeError::Pcsc(e)),
     }
 
     let state = reader_states[0].event_state();
     if !state.contains(State::PRESENT) {
-        return Ok((readers, false, None));
+        return Ok((readers, false, None, None));
     }
 
     // Card is present
     if skip_read {
-        return Ok((readers, true, None));
+        return Ok((readers, true, None, None));
     }
 
     let atr_bytes = reader_states[0].atr().to_vec();
-    let card = ctx.connect(reader_name, ShareMode::Shared, Protocols::ANY)?;
+    let mut card = ctx.connect(reader_name, ShareMode::Shared, Protocols::ANY)?;
 
     let result = match license::read_card(&card, &atr_bytes) {
         Ok(data) => {
@@ -171,11 +172,87 @@ fn poll_cycle(
         }
     };
 
-    // Disconnect with LeaveCard disposition to prevent reader reset.
-    // Default Drop uses ResetCard which triggers Windows USB notification sound.
-    let _ = card.disconnect(Disposition::LeaveCard);
+    // ============================================================================
+    // USB 切断音問題の試行錯誤履歴 (Firmware Ver.1.08)
+    // ============================================================================
+    // ❌ 試行1: CMD_SELECT_END + Disposition::LeaveCard
+    //    → USB切断音が鳴る
+    //
+    // ❌ 試行2: CMD_SELECT_END + Disposition::UnpowerCard (Python pyscard default)
+    //    → USB切断音が鳴る
+    //
+    // ❌ 試行3: CMD_SELECT_ENDスキップ + Disposition::UnpowerCard
+    //    → USB切断音が鳴る
+    //
+    // ❌ 試行4: CMD_SELECT_ENDスキップ + mem::forget() (disconnect呼ばない)
+    //    → USB切断音がまだ鳴る！
+    //
+    // ❌ 試行5: CMD_SELECT_END復活 + mem::forget()
+    //    → USB切断音がまだ鳴る
+    //
+    // ❌ 試行6: CMD_RF_OFF のみ、CMD_SELECT_ENDスキップ + mem::forget()
+    //    → USB切断音がまだ鳴る
+    //
+    // ❌ 試行7-8: SCardControl(Auto Polling無効化/Buzzer無効化) + mem::forget()
+    //    → カード検出自体ができなくなった
+    //
+    // ❌ 試行9: CMD_SELECT_END復活 + Disposition::LeaveCard (正常disconnect)
+    //    → USB切断音がまだ鳴る
+    //
+    // ❌ 試行10: printobserver.pyアプローチ（disconnect後にfalse返してカード削除扱い）
+    //    → USB切断音がまだ鳴る
+    //
+    // ❌ 試行11: カード読み取り直後に reconnect を試みる
+    //    → USB切断音がまだ鳴る
+    //
+    // ❌ 試行12: 完全にクリーンアップをスキップ（mem::forget() でリーク）
+    //    → USB切断音がまだ鳴る
+    //
+    // ❌ 試行13: printobserver.py の disconnect タイミングを完全再現
+    //    カード読み取り直後は disconnect せず、カード削除検出時のみ disconnect
+    //    → USB切断音がまだ鳴る（printobserver.py でも同様に鳴ることが判明）
+    //
+    // 📝 試行14 (現在): SCardReconnect を使用
+    //    printobserver.py 解析結果:
+    //    - カード追加イベントで CMD_SELECT_END 送信 + disconnect (Line 152, 157)
+    //    - カード削除イベントで再度 disconnect (Line 164)
+    //    - CardMonitor が別スレッドで監視（非同期処理）
+    //
+    //    修正内容:
+    //    - カード読み取り直後は disconnect を呼ばず、カードハンドルを返す
+    //    - カード削除検出時（次のポーリングサイクルでカード不在）のみ disconnect
+    //    - CMD_SELECT_END は送信する（printobserver.py と同じ）
+    //
+    //    仮説: カード読み取り**直後**の disconnect が USB 切断音の原因
+    //          カードが**物理的に離れた後**に disconnect すれば鳴らないはず
+    // ============================================================================
 
-    Ok((readers, true, result))
+    // 試行14: SCardReconnect を使用
+    // disconnect の代わりに reconnect を使うことで、USB 切断を防ぐ
+    // reconnect は接続を維持したままカードをリセットする
+    // 結果: USB切断音はまだ鳴る（reconnect でも同じ）
+    info!("[reader] Card read completed, waiting before reconnect");
+
+    // Wait 100ms before reconnect to avoid immediate reconnection issue
+    std::thread::sleep(std::time::Duration::from_millis(100));
+
+    info!("[reader] Attempting reconnect instead of disconnect");
+
+    match card.reconnect(ShareMode::Shared, Protocols::ANY, Disposition::ResetCard) {
+        Ok(_) => {
+            info!("[reader] Successfully reconnected to card");
+            // reconnect 成功後、カードを drop して disconnect
+            std::mem::drop(card);
+            info!("[reader] Card dropped after reconnect");
+        }
+        Err(e) => {
+            warn!("[reader] Failed to reconnect: {}, dropping card", e);
+            std::mem::drop(card);
+        }
+    }
+
+    // カードハンドルは返さない（既に drop 済み）
+    Ok((readers, true, result, None))
 }
 
 /// Main NFC polling loop. Runs indefinitely, sending events via broadcast channel.
@@ -186,6 +263,7 @@ pub async fn nfc_polling_loop(config: Config, event_tx: broadcast::Sender<NfcEve
     let mut previous_readers: Vec<String> = vec![];
     let mut ctx: Option<Arc<Context>> = None;
     let mut card_read_done = false;
+    let mut active_card: Option<pcsc::Card> = None; // Keep card handle for removal event
 
     loop {
         if ctx.is_none() {
@@ -204,10 +282,29 @@ pub async fn nfc_polling_loop(config: Config, event_tx: broadcast::Sender<NfcEve
         let cycle_result = tokio::task::spawn_blocking(move || poll_cycle(&ctx_ref, skip)).await;
 
         match cycle_result {
-            Ok(Ok((readers, card_present, card_result))) => {
-                // Card removed — allow next read
-                if !card_present {
+            Ok(Ok((readers, card_present, card_result, card_handle))) => {
+                // Card removed event - disconnect if we have an active card
+                if !card_present && active_card.is_some() {
+                    info!("[reader] Card removal detected, disconnecting...");
+                    if let Some(card) = active_card.take() {
+                        match card.disconnect(Disposition::LeaveCard) {
+                            Ok(_) => info!("[reader] Card disconnected on removal event"),
+                            Err((_, e)) => warn!("[reader] Failed to disconnect on removal: {}", e),
+                        }
+                    }
                     card_read_done = false;
+                } else if !card_present {
+                    card_read_done = false;
+                }
+
+                // Store card handle if we just read a card
+                if card_handle.is_some() {
+                    active_card = card_handle;
+                    card_read_done = true; // Prevent re-reading the same card
+                } else if card_result.is_some() {
+                    // Card was read successfully but handle is None (Trial 14: reconnect+drop)
+                    // Still need to mark as done to prevent re-reading the same card
+                    card_read_done = true;
                 }
 
                 // Hot-plug detection
@@ -216,6 +313,31 @@ pub async fn nfc_polling_loop(config: Config, event_tx: broadcast::Sender<NfcEve
                         "NFC readers changed: {:?} -> {:?}",
                         previous_readers, readers
                     );
+
+                    // Reset reader settings when a reader is detected
+                    if !readers.is_empty() && previous_readers.is_empty() {
+                        let ctx_clone = ctx.as_ref().unwrap().clone();
+                        let reader_name = std::ffi::CString::new(readers[0].as_str()).unwrap();
+                        tokio::task::spawn_blocking(move || {
+                            match ctx_clone.connect(&reader_name, ShareMode::Direct, Protocols::UNDEFINED) {
+                                Ok(card) => {
+                                    let control_code = pcsc::ctl_code(3500);
+                                    let enable_auto_polling = [
+                                        0xFF, 0x00, 0x40, // Escape Command: Set Polling Parameter
+                                        0x01, 0x01, 0x01, // Enable Auto Polling
+                                    ];
+                                    let mut recv_buf = [0u8; 256];
+                                    match card.control(control_code, &enable_auto_polling, &mut recv_buf) {
+                                        Ok(_) => info!("[reader] Reader settings reset: Auto Polling enabled"),
+                                        Err(e) => warn!("[reader] Failed to reset reader settings: {}", e),
+                                    }
+                                    let _ = card.disconnect(Disposition::LeaveCard);
+                                }
+                                Err(e) => warn!("[reader] Failed to connect for settings reset: {}", e),
+                            }
+                        });
+                    }
+
                     let _ = event_tx.send(NfcEvent::Status {
                         readers: readers.clone(),
                         connected: !readers.is_empty(),
