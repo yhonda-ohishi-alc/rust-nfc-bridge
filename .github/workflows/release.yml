@@ -32,16 +32,16 @@ jobs:
       - name: Run tests
         run: cargo test --release
 
-      - name: Install cargo-wix
-        run: cargo install cargo-wix
-
-      - name: Build MSI installer
-        run: cargo wix --no-build --nocapture
-
       - name: Extract version from tag
         id: version
         shell: bash
         run: echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
+      - name: Install cargo-wix
+        run: cargo install cargo-wix
+
+      - name: Build MSI installer
+        run: cargo wix --no-build --nocapture -D "Version=${{ steps.version.outputs.version }}.0"
 
       - name: Rename MSI for release
         shell: bash

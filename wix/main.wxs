@@ -12,7 +12,7 @@
     Manufacturer='$(var.Manufacturer)'
     Language='1033'
     Codepage='1252'
-    Version='!(bind.FileVersion.NfcBridgeExe)'>
+    Version='$(var.Version)'>
 
     <Package
       InstallerVersion='450'
