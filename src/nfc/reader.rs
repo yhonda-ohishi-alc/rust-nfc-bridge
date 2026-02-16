@@ -91,9 +91,7 @@ fn read_uid(card: &Card) -> Result<String, BridgeError> {
 fn poll_once() -> Result<Option<String>, BridgeError> {
     let ctx = Context::establish(Scope::User)?;
     let mut readers_buf = [0u8; 2048];
-    let reader_names: Vec<_> = ctx
-        .list_readers(&mut readers_buf)?
-        .collect();
+    let reader_names: Vec<_> = ctx.list_readers(&mut readers_buf)?.collect();
 
     if reader_names.is_empty() {
         return Err(BridgeError::NoReaders);
@@ -116,11 +114,7 @@ fn poll_once() -> Result<Option<String>, BridgeError> {
     }
 
     // Card is present — connect and read UID
-    let card = ctx.connect(
-        reader_name,
-        ShareMode::Shared,
-        Protocols::ANY,
-    )?;
+    let card = ctx.connect(reader_name, ShareMode::Shared, Protocols::ANY)?;
 
     let uid = read_uid(&card)?;
     debug!("Card UID: {}", uid);
@@ -140,9 +134,7 @@ pub async fn nfc_polling_loop(config: Config, event_tx: broadcast::Sender<NfcEve
             Ok(Ok(Some(uid))) => {
                 if debouncer.should_emit(&uid) {
                     info!("NFC read: {}", uid);
-                    let _ = event_tx.send(NfcEvent::NfcRead {
-                        employee_id: uid,
-                    });
+                    let _ = event_tx.send(NfcEvent::NfcRead { employee_id: uid });
                 }
             }
             Ok(Ok(None)) => {

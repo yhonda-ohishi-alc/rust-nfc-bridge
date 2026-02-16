@@ -27,7 +27,10 @@ pub async fn run(
             });
         }
         Err(e) => {
-            info!("No NFC readers found on startup: {}. Will keep retrying.", e);
+            info!(
+                "No NFC readers found on startup: {}. Will keep retrying.",
+                e
+            );
         }
     }
 
