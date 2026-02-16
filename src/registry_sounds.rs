@@ -141,9 +141,7 @@ impl SoundSuppressor {
     }
 
     /// Internal function to restore sounds from backups
-    fn restore_sounds(
-        backups: &HashMap<String, Option<String>>,
-    ) -> Result<usize, std::io::Error> {
+    fn restore_sounds(backups: &HashMap<String, Option<String>>) -> Result<usize, std::io::Error> {
         let hkcu = RegKey::predef(HKEY_CURRENT_USER);
         let sound_events = hkcu.open_subkey(SOUND_EVENTS_PATH)?;
         let mut restored_count = 0;
@@ -169,7 +167,10 @@ impl SoundSuppressor {
                     restored_count += 1;
                 }
                 Err(e) => {
-                    warn!("Failed to open sound event for restore {}: {}", event_path, e);
+                    warn!(
+                        "Failed to open sound event for restore {}: {}",
+                        event_path, e
+                    );
                     continue;
                 }
             }

@@ -113,7 +113,15 @@ fn read_uid(card: &Card) -> Result<String, BridgeError> {
 fn poll_cycle(
     ctx: &Context,
     skip_read: bool,
-) -> Result<(Vec<String>, bool, Option<CardReadResult>, Option<pcsc::Card>), BridgeError> {
+) -> Result<
+    (
+        Vec<String>,
+        bool,
+        Option<CardReadResult>,
+        Option<pcsc::Card>,
+    ),
+    BridgeError,
+> {
     let mut readers_buf = [0u8; 2048];
     let reader_names: Vec<_> = match ctx.list_readers(&mut readers_buf) {
         Ok(readers) => readers.collect(),
@@ -320,21 +328,36 @@ pub async fn nfc_polling_loop(config: Config, event_tx: broadcast::Sender<NfcEve
                         let ctx_clone = ctx.as_ref().unwrap().clone();
                         let reader_name = std::ffi::CString::new(readers[0].as_str()).unwrap();
                         tokio::task::spawn_blocking(move || {
-                            match ctx_clone.connect(&reader_name, ShareMode::Direct, Protocols::UNDEFINED) {
+                            match ctx_clone.connect(
+                                &reader_name,
+                                ShareMode::Direct,
+                                Protocols::UNDEFINED,
+                            ) {
                                 Ok(card) => {
                                     let control_code = pcsc::ctl_code(3500);
                                     let enable_auto_polling = [
-                                        0xFF, 0x00, 0x40, // Escape Command: Set Polling Parameter
+                                        0xFF, 0x00,
+                                        0x40, // Escape Command: Set Polling Parameter
                                         0x01, 0x01, 0x01, // Enable Auto Polling
                                     ];
                                     let mut recv_buf = [0u8; 256];
-                                    match card.control(control_code, &enable_auto_polling, &mut recv_buf) {
-                                        Ok(_) => info!("[reader] Reader settings reset: Auto Polling enabled"),
-                                        Err(e) => warn!("[reader] Failed to reset reader settings: {}", e),
+                                    match card.control(
+                                        control_code,
+                                        &enable_auto_polling,
+                                        &mut recv_buf,
+                                    ) {
+                                        Ok(_) => info!(
+                                            "[reader] Reader settings reset: Auto Polling enabled"
+                                        ),
+                                        Err(e) => {
+                                            warn!("[reader] Failed to reset reader settings: {}", e)
+                                        }
                                     }
                                     let _ = card.disconnect(Disposition::LeaveCard);
                                 }
-                                Err(e) => warn!("[reader] Failed to connect for settings reset: {}", e),
+                                Err(e) => {
+                                    warn!("[reader] Failed to connect for settings reset: {}", e)
+                                }
                             }
                         });
                     }
