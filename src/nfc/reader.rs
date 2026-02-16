@@ -201,8 +201,7 @@ pub async fn nfc_polling_loop(config: Config, event_tx: broadcast::Sender<NfcEve
 
         let ctx_ref = ctx.as_ref().unwrap().clone();
         let skip = card_read_done;
-        let cycle_result =
-            tokio::task::spawn_blocking(move || poll_cycle(&ctx_ref, skip)).await;
+        let cycle_result = tokio::task::spawn_blocking(move || poll_cycle(&ctx_ref, skip)).await;
 
         match cycle_result {
             Ok(Ok((readers, card_present, card_result))) => {
