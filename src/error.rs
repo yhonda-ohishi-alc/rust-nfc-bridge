@@ -3,7 +3,7 @@ use std::fmt;
 #[derive(Debug)]
 pub enum BridgeError {
     Pcsc(pcsc::Error),
-    WebSocket(tokio_tungstenite::tungstenite::Error),
+    WebSocket(Box<tokio_tungstenite::tungstenite::Error>),
     Io(std::io::Error),
     NoReaders,
     CardReadFailed(String),
@@ -31,7 +31,7 @@ impl From<pcsc::Error> for BridgeError {
 
 impl From<tokio_tungstenite::tungstenite::Error> for BridgeError {
     fn from(e: tokio_tungstenite::tungstenite::Error) -> Self {
-        Self::WebSocket(e)
+        Self::WebSocket(Box::new(e))
     }
 }
 

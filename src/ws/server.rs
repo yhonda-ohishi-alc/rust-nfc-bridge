@@ -45,7 +45,7 @@ pub async fn run_ws_server(
             let mut dead_clients = vec![];
 
             for (id, sink) in map.iter_mut() {
-                if sink.send(Message::Text(json.clone().into())).await.is_err() {
+                if sink.send(Message::Text(json.clone())).await.is_err() {
                     dead_clients.push(*id);
                 }
             }
