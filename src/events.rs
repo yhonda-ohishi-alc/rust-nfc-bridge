@@ -23,6 +23,7 @@ pub enum NfcEvent {
     Status {
         readers: Vec<String>,
         connected: bool,
+        version: String,
     },
 }
 
@@ -55,11 +56,13 @@ mod tests {
         let event = NfcEvent::Status {
             readers: vec!["ACS ACR122U".to_string()],
             connected: true,
+            version: "0.1.0".to_string(),
         };
         let json = serde_json::to_value(&event).unwrap();
         assert_eq!(json["type"], "status");
         assert_eq!(json["readers"][0], "ACS ACR122U");
         assert_eq!(json["connected"], true);
+        assert_eq!(json["version"], "0.1.0");
     }
 
     #[test]
@@ -67,10 +70,12 @@ mod tests {
         let event = NfcEvent::Status {
             readers: vec![],
             connected: false,
+            version: "0.1.0".to_string(),
         };
         let json = serde_json::to_value(&event).unwrap();
         assert_eq!(json["type"], "status");
         assert!(json["readers"].as_array().unwrap().is_empty());
         assert_eq!(json["connected"], false);
+        assert_eq!(json["version"], "0.1.0");
     }
 }

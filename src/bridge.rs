@@ -24,6 +24,7 @@ pub async fn run(
             let _ = event_tx.send(NfcEvent::Status {
                 readers: readers.clone(),
                 connected: !readers.is_empty(),
+                version: env!("CARGO_PKG_VERSION").to_string(),
             });
         }
         Err(e) => {
