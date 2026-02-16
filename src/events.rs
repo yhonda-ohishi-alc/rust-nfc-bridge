@@ -14,6 +14,20 @@ pub enum NfcEvent {
     #[serde(rename = "nfc_read")]
     NfcRead { employee_id: String },
 
+    /// Driver's license (or other typed card) successfully read.
+    #[serde(rename = "nfc_license_read")]
+    NfcLicenseRead {
+        card_id: String,
+        card_type: String,
+        atr: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        expiry_date: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        remain_count: Option<u8>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        felica_uid: Option<String>,
+    },
+
     /// Error during NFC operation.
     #[serde(rename = "nfc_error")]
     NfcError { error: String },
@@ -63,6 +77,40 @@ mod tests {
         assert_eq!(json["readers"][0], "ACS ACR122U");
         assert_eq!(json["connected"], true);
         assert_eq!(json["version"], "0.1.0");
+    }
+
+    #[test]
+    fn serialize_nfc_license_read() {
+        let event = NfcEvent::NfcLicenseRead {
+            card_id: "AABBCCDD11223344".to_string(),
+            card_type: "driver_license".to_string(),
+            atr: "3B888001000000XX".to_string(),
+            expiry_date: Some("AABBCCDD112233445566778899AABBCCDD".to_string()),
+            remain_count: Some(3),
+            felica_uid: Some("0102030405060708".to_string()),
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "nfc_license_read");
+        assert_eq!(json["card_id"], "AABBCCDD11223344");
+        assert_eq!(json["card_type"], "driver_license");
+        assert_eq!(json["remain_count"], 3);
+    }
+
+    #[test]
+    fn serialize_nfc_license_read_skips_none() {
+        let event = NfcEvent::NfcLicenseRead {
+            card_id: "0102030405060708".to_string(),
+            card_type: "other".to_string(),
+            atr: "3B8F80018000".to_string(),
+            expiry_date: None,
+            remain_count: None,
+            felica_uid: Some("0102030405060708".to_string()),
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "nfc_license_read");
+        assert!(json.get("expiry_date").is_none());
+        assert!(json.get("remain_count").is_none());
+        assert_eq!(json["felica_uid"], "0102030405060708");
     }
 
     #[test]

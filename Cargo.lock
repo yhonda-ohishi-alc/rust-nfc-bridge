@@ -385,7 +385,7 @@ dependencies = [
 
 [[package]]
 name = "nfc-bridge"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "clap",
  "futures-util",

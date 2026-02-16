@@ -7,6 +7,7 @@ use tracing::{debug, info, warn};
 use crate::config::Config;
 use crate::error::BridgeError;
 use crate::events::NfcEvent;
+use crate::nfc::license;
 
 /// GET DATA APDU command to read card UID.
 /// Works for both MIFARE (4/7 bytes) and FeliCa (8 bytes IDm).
@@ -42,6 +43,23 @@ impl CardDebouncer {
         self.last_uid = Some(uid.to_string());
         self.last_seen = Some(now);
         true
+    }
+}
+
+/// Result of a single card poll.
+pub enum CardReadResult {
+    /// Simple UID read (fallback).
+    Uid(String),
+    /// Full license data read.
+    License(license::LicenseData),
+}
+
+impl CardReadResult {
+    fn debounce_key(&self) -> &str {
+        match self {
+            CardReadResult::Uid(uid) => uid,
+            CardReadResult::License(data) => &data.card_id,
+        }
     }
 }
 
@@ -86,9 +104,9 @@ fn read_uid(card: &Card) -> Result<String, BridgeError> {
     Ok(uid_hex)
 }
 
-/// Poll for a card on the first available reader and read its UID.
+/// Poll for a card on the first available reader and read its data.
 /// This is a blocking function — must be called via spawn_blocking.
-fn poll_once() -> Result<Option<String>, BridgeError> {
+fn poll_once() -> Result<Option<CardReadResult>, BridgeError> {
     let ctx = Context::establish(Scope::User)?;
     let mut readers_buf = [0u8; 2048];
     let reader_names: Vec<_> = ctx.list_readers(&mut readers_buf)?.collect();
@@ -113,12 +131,34 @@ fn poll_once() -> Result<Option<String>, BridgeError> {
         return Ok(None);
     }
 
-    // Card is present — connect and read UID
+    // Get ATR from reader state (available before connecting)
+    let atr_bytes = reader_states[0].atr().to_vec();
+
+    // Card is present — connect and read
     let card = ctx.connect(reader_name, ShareMode::Shared, Protocols::ANY)?;
 
-    let uid = read_uid(&card)?;
-    debug!("Card UID: {}", uid);
-    Ok(Some(uid))
+    // Attempt full license read
+    match license::read_card(&card, &atr_bytes) {
+        Ok(data) => {
+            debug!(
+                "Card read: card_id={}, type={}",
+                data.card_id,
+                data.card_type.as_str()
+            );
+            Ok(Some(CardReadResult::License(data)))
+        }
+        Err(e) => {
+            // Fallback to simple UID read
+            warn!("License read failed ({}), falling back to UID", e);
+            match read_uid(&card) {
+                Ok(uid) => {
+                    debug!("Fallback UID: {}", uid);
+                    Ok(Some(CardReadResult::Uid(uid)))
+                }
+                Err(uid_err) => Err(uid_err),
+            }
+        }
+    }
 }
 
 /// Main NFC polling loop. Runs indefinitely, sending events via broadcast channel.
@@ -151,10 +191,31 @@ pub async fn nfc_polling_loop(config: Config, event_tx: broadcast::Sender<NfcEve
         let poll_result = tokio::task::spawn_blocking(poll_once).await;
 
         match poll_result {
-            Ok(Ok(Some(uid))) => {
-                if debouncer.should_emit(&uid) {
-                    info!("NFC read: {}", uid);
-                    let _ = event_tx.send(NfcEvent::NfcRead { employee_id: uid });
+            Ok(Ok(Some(result))) => {
+                if debouncer.should_emit(result.debounce_key()) {
+                    let event = match result {
+                        CardReadResult::Uid(uid) => {
+                            info!("NFC read (UID): {}", uid);
+                            NfcEvent::NfcRead { employee_id: uid }
+                        }
+                        CardReadResult::License(data) => {
+                            info!(
+                                "NFC read ({}): card_id={}, remain={:?}",
+                                data.card_type.as_str(),
+                                data.card_id,
+                                data.remain_count
+                            );
+                            NfcEvent::NfcLicenseRead {
+                                card_id: data.card_id,
+                                card_type: data.card_type.as_str().to_string(),
+                                atr: data.atr,
+                                expiry_date: data.expiry_date,
+                                remain_count: data.remain_count,
+                                felica_uid: data.felica_uid,
+                            }
+                        }
+                    };
+                    let _ = event_tx.send(event);
                 }
             }
             Ok(Ok(None)) => {
