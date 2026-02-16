@@ -29,6 +29,9 @@ const CMD_SELECT_EXPIRE_MF: &[u8] = &[0x00, 0xA4, 0x02, 0x0C, 0x02, 0x2F, 0x01];
 /// Read expiry date data (17 bytes).
 const CMD_READ_EXPIRE_DF: &[u8] = &[0x00, 0xB0, 0x00, 0x00, 0x11];
 
+/// End transparent session.
+const CMD_SELECT_END: &[u8] = &[0xFF, 0xC2, 0x00, 0x00, 0x02, 0x82, 0x00];
+
 /// Driver's license ATR prefix (7 bytes).
 const DRIVER_LICENSE_ATR_PREFIX: &[u8] = &[0x3B, 0x88, 0x80, 0x01, 0x00, 0x00, 0x00];
 
@@ -194,6 +197,10 @@ pub fn read_card(card: &Card, atr_bytes: &[u8]) -> Result<LicenseData, BridgeErr
     };
 
     info!("[license] card_id: {}", card_id);
+
+    // End transparent session so reader returns to normal mode.
+    // Without this, removing the card while in transparent mode causes USB reset.
+    let _ = transmit_apdu(card, CMD_SELECT_END);
 
     Ok(LicenseData {
         card_id,
