@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use pcsc::*;
@@ -104,15 +105,23 @@ fn read_uid(card: &Card) -> Result<String, BridgeError> {
     Ok(uid_hex)
 }
 
-/// Poll for a card on the first available reader and read its data.
-/// This is a blocking function — must be called via spawn_blocking.
-fn poll_once() -> Result<Option<CardReadResult>, BridgeError> {
-    let ctx = Context::establish(Scope::User)?;
+/// Combined poll cycle: list readers + poll card using a shared Context.
+/// This avoids creating/destroying the PCSC context on every iteration.
+fn poll_cycle(ctx: &Context) -> Result<(Vec<String>, Option<CardReadResult>), BridgeError> {
     let mut readers_buf = [0u8; 2048];
-    let reader_names: Vec<_> = ctx.list_readers(&mut readers_buf)?.collect();
+    let reader_names: Vec<_> = match ctx.list_readers(&mut readers_buf) {
+        Ok(readers) => readers.collect(),
+        Err(pcsc::Error::NoReadersAvailable) => return Ok((vec![], None)),
+        Err(e) => return Err(BridgeError::Pcsc(e)),
+    };
+
+    let readers: Vec<String> = reader_names
+        .iter()
+        .map(|r| r.to_str().unwrap_or("unknown").to_string())
+        .collect();
 
     if reader_names.is_empty() {
-        return Err(BridgeError::NoReaders);
+        return Ok((readers, None));
     }
 
     let reader_name = reader_names[0];
@@ -122,13 +131,13 @@ fn poll_once() -> Result<Option<CardReadResult>, BridgeError> {
     // Wait up to 200ms for a card event
     match ctx.get_status_change(Duration::from_millis(200), &mut reader_states) {
         Ok(()) => {}
-        Err(pcsc::Error::Timeout) => return Ok(None),
+        Err(pcsc::Error::Timeout) => return Ok((readers, None)),
         Err(e) => return Err(BridgeError::Pcsc(e)),
     }
 
     let state = reader_states[0].event_state();
     if !state.contains(State::PRESENT) {
-        return Ok(None);
+        return Ok((readers, None));
     }
 
     // Get ATR from reader state (available before connecting)
@@ -137,7 +146,6 @@ fn poll_once() -> Result<Option<CardReadResult>, BridgeError> {
     // Card is present — connect and read
     let card = ctx.connect(reader_name, ShareMode::Shared, Protocols::ANY)?;
 
-    // Attempt full license read
     let result = match license::read_card(&card, &atr_bytes) {
         Ok(data) => {
             debug!(
@@ -145,17 +153,16 @@ fn poll_once() -> Result<Option<CardReadResult>, BridgeError> {
                 data.card_id,
                 data.card_type.as_str()
             );
-            Ok(Some(CardReadResult::License(data)))
+            Some(CardReadResult::License(data))
         }
         Err(e) => {
-            // Fallback to simple UID read
             warn!("License read failed ({}), falling back to UID", e);
             match read_uid(&card) {
                 Ok(uid) => {
                     debug!("Fallback UID: {}", uid);
-                    Ok(Some(CardReadResult::Uid(uid)))
+                    Some(CardReadResult::Uid(uid))
                 }
-                Err(uid_err) => Err(uid_err),
+                Err(_) => return Ok((readers, None)),
             }
         }
     };
@@ -164,81 +171,96 @@ fn poll_once() -> Result<Option<CardReadResult>, BridgeError> {
     // The default Drop uses ResetCard, which power-cycles the reader's RF field.
     let _ = card.disconnect(Disposition::LeaveCard);
 
-    result
+    Ok((readers, result))
 }
 
 /// Main NFC polling loop. Runs indefinitely, sending events via broadcast channel.
+/// The PCSC context is created once and reused across iterations to avoid
+/// repeated SCardEstablishContext/SCardReleaseContext calls that can cause
+/// the NFC reader to reset.
 pub async fn nfc_polling_loop(config: Config, event_tx: broadcast::Sender<NfcEvent>) {
     let mut debouncer = CardDebouncer::new(Duration::from_millis(config.cooldown_ms));
     let poll_interval = Duration::from_millis(config.poll_interval_ms);
     let mut last_no_readers_log = Instant::now() - Duration::from_secs(10);
     let mut previous_readers: Vec<String> = vec![];
+    let mut ctx: Option<Arc<Context>> = None;
 
     loop {
-        // Check for reader list changes (hot-plug detection)
-        let current_readers = tokio::task::spawn_blocking(list_readers_sync)
-            .await
-            .unwrap_or(Ok(vec![]))
-            .unwrap_or_default();
-
-        if current_readers != previous_readers {
-            info!(
-                "NFC readers changed: {:?} -> {:?}",
-                previous_readers, current_readers
-            );
-            let _ = event_tx.send(NfcEvent::Status {
-                readers: current_readers.clone(),
-                connected: !current_readers.is_empty(),
-                version: env!("CARGO_PKG_VERSION").to_string(),
-            });
-            previous_readers = current_readers;
-        }
-
-        let poll_result = tokio::task::spawn_blocking(poll_once).await;
-
-        match poll_result {
-            Ok(Ok(Some(result))) => {
-                if debouncer.should_emit(result.debounce_key()) {
-                    let event = match result {
-                        CardReadResult::Uid(uid) => {
-                            info!("NFC read (UID): {}", uid);
-                            NfcEvent::NfcRead { employee_id: uid }
-                        }
-                        CardReadResult::License(data) => {
-                            info!(
-                                "NFC read ({}): card_id={}, remain={:?}",
-                                data.card_type.as_str(),
-                                data.card_id,
-                                data.remain_count
-                            );
-                            NfcEvent::NfcLicenseRead {
-                                card_id: data.card_id,
-                                card_type: data.card_type.as_str().to_string(),
-                                atr: data.atr,
-                                expiry_date: data.expiry_date,
-                                remain_count: data.remain_count,
-                                felica_uid: data.felica_uid,
-                            }
-                        }
-                    };
-                    let _ = event_tx.send(event);
+        // Ensure we have a valid PCSC context (created once, reused across iterations)
+        if ctx.is_none() {
+            match Context::establish(Scope::User) {
+                Ok(c) => ctx = Some(Arc::new(c)),
+                Err(e) => {
+                    warn!("Failed to establish PCSC context: {}", e);
+                    tokio::time::sleep(poll_interval).await;
+                    continue;
                 }
             }
-            Ok(Ok(None)) => {
-                // No card present, continue polling
-            }
-            Ok(Err(BridgeError::NoReaders)) => {
-                // Only log periodically to avoid spam
-                if last_no_readers_log.elapsed() > Duration::from_secs(5) {
+        }
+
+        let ctx_ref = ctx.as_ref().unwrap().clone();
+        let cycle_result = tokio::task::spawn_blocking(move || poll_cycle(&ctx_ref)).await;
+
+        match cycle_result {
+            Ok(Ok((readers, card_result))) => {
+                // Hot-plug detection
+                if readers != previous_readers {
+                    info!(
+                        "NFC readers changed: {:?} -> {:?}",
+                        previous_readers, readers
+                    );
+                    let _ = event_tx.send(NfcEvent::Status {
+                        readers: readers.clone(),
+                        connected: !readers.is_empty(),
+                        version: env!("CARGO_PKG_VERSION").to_string(),
+                    });
+                    previous_readers = readers;
+                }
+
+                // No readers warning (throttled)
+                if previous_readers.is_empty()
+                    && last_no_readers_log.elapsed() > Duration::from_secs(5)
+                {
                     warn!("No NFC readers found, retrying...");
                     let _ = event_tx.send(NfcEvent::NfcError {
                         error: "no_readers".to_string(),
                     });
                     last_no_readers_log = Instant::now();
                 }
+
+                // Handle card read
+                if let Some(result) = card_result {
+                    if debouncer.should_emit(result.debounce_key()) {
+                        let event = match result {
+                            CardReadResult::Uid(uid) => {
+                                info!("NFC read (UID): {}", uid);
+                                NfcEvent::NfcRead { employee_id: uid }
+                            }
+                            CardReadResult::License(data) => {
+                                info!(
+                                    "NFC read ({}): card_id={}, remain={:?}",
+                                    data.card_type.as_str(),
+                                    data.card_id,
+                                    data.remain_count
+                                );
+                                NfcEvent::NfcLicenseRead {
+                                    card_id: data.card_id,
+                                    card_type: data.card_type.as_str().to_string(),
+                                    atr: data.atr,
+                                    expiry_date: data.expiry_date,
+                                    remain_count: data.remain_count,
+                                    felica_uid: data.felica_uid,
+                                }
+                            }
+                        };
+                        let _ = event_tx.send(event);
+                    }
+                }
             }
             Ok(Err(e)) => {
-                warn!("NFC poll error: {}", e);
+                // PCSC error — context may be invalid, recreate on next iteration
+                warn!("NFC poll error: {}, will re-establish context", e);
+                ctx = None;
                 let _ = event_tx.send(NfcEvent::NfcError {
                     error: e.to_string(),
                 });

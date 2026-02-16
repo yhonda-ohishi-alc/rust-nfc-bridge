@@ -5,7 +5,6 @@ pub enum BridgeError {
     Pcsc(pcsc::Error),
     WebSocket(Box<tokio_tungstenite::tungstenite::Error>),
     Io(std::io::Error),
-    NoReaders,
     CardReadFailed(String),
 }
 
@@ -15,7 +14,6 @@ impl fmt::Display for BridgeError {
             Self::Pcsc(e) => write!(f, "PC/SC error: {}", e),
             Self::WebSocket(e) => write!(f, "WebSocket error: {}", e),
             Self::Io(e) => write!(f, "IO error: {}", e),
-            Self::NoReaders => write!(f, "No NFC readers found"),
             Self::CardReadFailed(msg) => write!(f, "Card read failed: {}", msg),
         }
     }
