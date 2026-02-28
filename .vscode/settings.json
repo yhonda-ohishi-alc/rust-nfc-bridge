@@ -1,0 +1,6 @@
+{
+  "git.scanRepositories": [
+    "alc-app"
+  ],
+  "git.autoRepositoryDetection": true
+}
